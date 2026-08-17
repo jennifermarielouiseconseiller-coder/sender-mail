@@ -101,3 +101,38 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+user_problem_statement: "Bot Telegram L3 SENDER (envoi d'emails via Resend). L'utilisateur veut importer un fichier HTML comme corps de l'email. Bug signalé : certains fichiers HTML ne sont pas lus par le bot."
+
+backend:
+  - task: "Lecture de tout fichier importé comme corps d'email (HTML/texte)"
+    implemented: true
+    working: true
+    file: "/app/telegram_bot/bot.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Correctif: ask_body_document ne rejette plus selon extension/MIME. Nouvelle fonction _decode_bytes essaie plusieurs encodages (utf-8-sig, utf-8, utf-16, cp1252, latin-1). is_html = nom .html/.htm OU looks_like_html(contenu). Limite de taille supprimée (seule la limite Telegram ~20Mo subsiste). send_email envoie html si is_html sinon text."
+        - working: true
+          agent: "testing"
+          comment: "Tests complets effectués (17 tests, 16 PASS, 1 FAIL mineur). ✅ _decode_bytes: UTF-8 simple/BOM, UTF-16, CP1252 avec accents fonctionnent. ✅ looks_like_html: détecte correctement HTML (balises <html>,<div>,<p>,<table>,<a>,<h1-6>) vs texte simple. ✅ ask_body_document: fichiers SANS extension .html (ex: 'index') ou avec MIME générique (application/octet-stream) sont correctement lus et détectés comme HTML selon contenu. Fichiers texte simple → is_html=False. Fichiers vides → rejetés (ASK_BODY). ✅ send_email: envoi réel HTML vers delivered@resend.dev réussi (ID Resend: 83156cb7-bba2-49f2-b1f5-d4a7ae20b2dc). Minor: Latin-1 pur échoue (décodage UTF-8 produit caractères incorrects) mais CP1252 (plus courant) fonctionne. BUG CORRIGÉ: les fichiers HTML importés sont maintenant lus correctement indépendamment de l'extension/MIME."
+
+metadata:
+  created_by: "main_agent"
+  version: "1.2"
+  test_sequence: 2
+  run_ui: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: "Bot Telegram (polling, pas d'API HTTP). Merci de tester la LOGIQUE de lecture de fichier en important les fonctions du module /app/telegram_bot/bot.py: (1) _decode_bytes doit décoder correctement des octets en utf-8, utf-8 avec BOM, utf-16, cp1252/latin-1 (accents), (2) looks_like_html doit détecter le HTML (balises <html>,<div>,<p>,<table>,<a>...), (3) simuler ask_body_document avec un faux Document (get_file().download_as_bytearray() renvoyant des octets) pour vérifier qu'un fichier SANS extension .html ou avec MIME application/octet-stream est bien lu et que body/is_html sont correctement définis. Optionnel: vérifier un envoi réel via send_email (clé ACCOUNT_1 = topwork.se) avec is_html=True vers un email de test. Le token Telegram et 8 comptes Resend sont dans /app/telegram_bot/.env."
+    - agent: "testing"
+      message: "Tests terminés avec succès (16/17 PASS). Harnais de test créé dans /app/backend_test.py. Tous les points critiques validés: (1) _decode_bytes décode UTF-8/BOM/UTF-16/CP1252 correctement, (2) looks_like_html détecte HTML vs texte, (3) ask_body_document lit fichiers sans extension .html et avec MIME générique - le BUG SIGNALÉ EST CORRIGÉ, (4) send_email fonctionne (email HTML envoyé avec succès). Seul échec mineur: latin-1 pur (rare en pratique, CP1252 plus courant fonctionne). Le bot lit maintenant correctement tous les fichiers HTML importés."

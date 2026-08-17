@@ -393,36 +393,57 @@ async def ask_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await _finish_body(update, context)
 
 
-async def ask_body_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Traite un fichier HTML envoyé en pièce jointe comme corps de l'email."""
-    doc = update.message.document
-    filename = (doc.file_name or "").lower()
-    is_html_file = filename.endswith((".html", ".htm")) or (doc.mime_type or "") == "text/html"
+def _decode_bytes(raw: bytes) -> str:
+    """Décode des octets en texte en essayant plusieurs encodages courants.
 
-    if not is_html_file:
-        await update.message.reply_text(
-            "❌ Fichier non pris en charge. Envoyez un fichier `.html` "
-            "(ou tapez/collez votre message).",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return ASK_BODY
+    UTF-16 n'est tenté que si un BOM UTF-16 est présent, sinon il « attrape »
+    à tort des octets Latin-1/CP1252 et produit du texte illisible.
+    """
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except (UnicodeDecodeError, LookupError):
+            pass
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+async def ask_body_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Traite TOUT fichier envoyé en pièce jointe comme corps de l'email.
+
+    On ne rejette plus selon l'extension/type MIME : on télécharge, on décode
+    le texte, et on détecte le HTML d'après le contenu ou le nom du fichier.
+    """
+    doc = update.message.document
+    filename = doc.file_name or "fichier"
 
     try:
         tg_file = await doc.get_file()
         content_bytes = await tg_file.download_as_bytearray()
-        content = bytes(content_bytes).decode("utf-8", errors="replace")
+        content = _decode_bytes(bytes(content_bytes))
     except Exception as e:  # noqa: BLE001
-        await update.message.reply_text(f"❌ Impossible de lire le fichier : {e}")
+        await update.message.reply_text(
+            f"❌ Impossible de télécharger le fichier : {e}\n"
+            "Astuce : Telegram limite les fichiers reçus par un bot à ~20 Mo."
+        )
         return ASK_BODY
 
     if not content.strip():
-        await update.message.reply_text("❌ Le fichier est vide. Réessayez :")
+        await update.message.reply_text("❌ Le fichier semble vide ou illisible. Réessayez :")
         return ASK_BODY
 
+    name_is_html = filename.lower().endswith((".html", ".htm"))
+    is_html = name_is_html or looks_like_html(content)
+
     context.user_data["body"] = content
-    context.user_data["is_html"] = True
+    context.user_data["is_html"] = is_html
+    fmt = "HTML" if is_html else "Texte"
     await update.message.reply_text(
-        f"📎 Fichier HTML reçu : `{doc.file_name}` ({len(content)} caractères).",
+        f"📎 Fichier reçu : `{filename}` — {len(content)} caractères, format détecté : *{fmt}*.",
         parse_mode=ParseMode.MARKDOWN,
     )
     return await _finish_body(update, context)
