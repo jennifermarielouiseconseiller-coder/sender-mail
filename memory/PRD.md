@@ -36,8 +36,12 @@
 - Note : pas de « clé Resend Emergent » (n'existe pas) → Compte 2 utilise un 2e domaine vérifié de la même clé, remplaçable par une autre clé plus tard.
 - Raccourci `/email dest | sujet | msg` conservé.
 
-## Itération 3 (2026-08-17)
-- Ajout de 2 nouvelles clés Resend et de tous leurs domaines vérifiés comme expéditeurs. 7 comptes au total, testés OK :
+## Itération 4 (2026-08-17) — Support HTML + rebrand
+- **Envoi HTML** : à l'étape « message » de `/email`, on peut désormais envoyer un **fichier `.html`** (≤ 2 Mo), **coller du code HTML**, ou taper du texte. Détection auto du HTML → email envoyé en `html` (sinon `text`). Aperçu indique le format. ✅ TESTÉ de bout en bout (envoi HTML réel via Resend, ID retourné).
+- **Rebrand** : titre du bot renommé « **L3 SENDER** » (au lieu de « Bot d'envoi d'emails (Resend) »).
+- **Correctif conflit d'instances** : après reset conteneur, `.env` + config supervisor + deps recréés. Config supervisor pointe sur `/root/.venv/bin/python`. Bot relancé en instance unique (résout le 409 Conflict Telegram).
+- 8 expéditeurs actifs : topwork.se, forssdigital.com (clé re_9Ubt3F16) ; upterior.eu, upterior.nl, gr-imm.com (clé re_H4Z86RY3) ; deadhidden.org, thebiblicalmantruth.com (clé re_8RhZzASD) ; sanddollardesign.co.za (clé re_YCgXgWeL).
+
   - Clé topwork : topwork.se, forssdigital.com
   - Clé A : deadhidden.org, thebiblicalmantruth.com
   - Clé B : upterior.eu, upterior.nl, gr-imm.com (hout-shop.com ignoré = non vérifié)
