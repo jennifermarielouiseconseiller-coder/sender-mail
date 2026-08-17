@@ -10,9 +10,8 @@ import re
 import logging
 from pathlib import Path
 
+import resend
 from dotenv import load_dotenv
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -30,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger("email-bot")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 
 # Liste blanche d'IDs Telegram autorisés (séparés par des virgules)
@@ -100,24 +99,22 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def send_email(to: str, subject: str, body: str) -> tuple[bool, str]:
-    """Envoie un email via SendGrid. Retourne (succès, message)."""
-    if not SENDGRID_API_KEY:
-        return False, "Clé SendGrid non configurée (SENDGRID_API_KEY)."
+    """Envoie un email via Resend. Retourne (succès, message)."""
+    if not RESEND_API_KEY:
+        return False, "Clé Resend non configurée (RESEND_API_KEY)."
     if not SENDER_EMAIL:
         return False, "Email expéditeur non configuré (SENDER_EMAIL)."
 
-    message = Mail(
-        from_email=SENDER_EMAIL,
-        to_emails=to,
-        subject=subject,
-        plain_text_content=body,
-    )
+    resend.api_key = RESEND_API_KEY
     try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        response = sg.send(message)
-        if response.status_code in (200, 201, 202):
-            return True, f"Statut SendGrid : {response.status_code}"
-        return False, f"SendGrid a répondu avec le statut {response.status_code}"
+        result = resend.Emails.send({
+            "from": SENDER_EMAIL,
+            "to": [to],
+            "subject": subject,
+            "text": body,
+        })
+        email_id = result.get("id") if isinstance(result, dict) else None
+        return True, f"ID Resend : {email_id}"
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 

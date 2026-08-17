@@ -1,6 +1,6 @@
-# Bot Telegram — Envoi d'emails via SendGrid
+# Bot Telegram — Envoi d'emails via Resend
 
-Bot Telegram classique (mode polling) qui envoie des emails via SendGrid.
+Bot Telegram classique (mode polling) qui envoie des emails via Resend.
 
 ## Commandes
 - `/start` — message de bienvenue
@@ -10,8 +10,8 @@ Bot Telegram classique (mode polling) qui envoie des emails via SendGrid.
 
 ## Configuration (`.env`)
 - `TELEGRAM_BOT_TOKEN` — token du bot (@BotFather)
-- `SENDGRID_API_KEY` — clé API SendGrid (permission *Mail Send* minimum)
-- `SENDER_EMAIL` — adresse expéditeur **vérifiée** dans SendGrid
+- `RESEND_API_KEY` — clé API Resend (`re_...`)
+- `SENDER_EMAIL` — adresse expéditeur sur un domaine **vérifié** dans Resend (ex: noreply@topwork.se)
 - `AUTHORIZED_USER_IDS` — IDs Telegram autorisés, séparés par des virgules
 
 ## Exécution

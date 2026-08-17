@@ -19,14 +19,12 @@
 - Bot Telegram en ligne (connecté à Telegram, polling actif) ✅
 - Commandes : `/start`, `/help`, `/whoami`, `/email` ✅
 - Contrôle d'accès par liste blanche d'IDs ✅
-- Envoi d'email via SendGrid (parsing `destinataire | sujet | message`, validation) ✅ (code)
+- Envoi d'email via **Resend** (`noreply@topwork.se`, domaine `topwork.se` vérifié) ✅ TESTÉ de bout en bout (email envoyé avec succès, ID Resend retourné)
 - Gestion d'erreurs + retour de statut à l'utilisateur ✅
 
-## Bloquants (dépendances externes, hors code)
-- ⚠️ Clé SendGrid fournie renvoie `401 invalid/expired/revoked` (2 clés testées). Envoi d'email non testé de bout en bout.
-- ⚠️ `SENDER_EMAIL` non fourni : SendGrid exige un expéditeur VÉRIFIÉ.
+## Note
+- SendGrid abandonné (les 2 clés fournies étaient invalides/révoquées). Migration vers Resend.
 
 ## Backlog / Next
-- P0 : Clé SendGrid valide + email expéditeur vérifié → test d'envoi réel
-- P1 : Historique des envois, templates d'email, pièces jointes
+- P1 : Historique des envois, templates d'email, pièces jointes, support HTML
 - P2 : Mode guidé étape par étape, tableau de bord web
