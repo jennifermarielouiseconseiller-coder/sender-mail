@@ -35,3 +35,10 @@
 - Sélecteur multi-comptes/clés : Compte 1 (topwork.se) / Compte 2 (forssdigital.com), extensible jusqu'à 5 via `ACCOUNT_n_*` ✅ TESTÉ (envoi compte 2 + nom perso OK)
 - Note : pas de « clé Resend Emergent » (n'existe pas) → Compte 2 utilise un 2e domaine vérifié de la même clé, remplaçable par une autre clé plus tard.
 - Raccourci `/email dest | sujet | msg` conservé.
+
+## Itération 3 (2026-08-17)
+- Ajout de 2 nouvelles clés Resend et de tous leurs domaines vérifiés comme expéditeurs. 7 comptes au total, testés OK :
+  - Clé topwork : topwork.se, forssdigital.com
+  - Clé A : deadhidden.org, thebiblicalmantruth.com
+  - Clé B : upterior.eu, upterior.nl, gr-imm.com (hout-shop.com ignoré = non vérifié)
+- Limite de comptes portée à 20 (`ACCOUNT_1..20`).

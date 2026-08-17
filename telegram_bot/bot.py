@@ -59,7 +59,7 @@ CHOOSE_ACCOUNT, ASK_NAME, ASK_TO, ASK_SUBJECT, ASK_BODY, CONFIRM = range(6)
 def load_accounts() -> list[dict]:
     """Charge les comptes depuis les variables ACCOUNT_n_KEY / _SENDER / _LABEL."""
     accounts = []
-    for i in range(1, 6):
+    for i in range(1, 21):
         key = os.getenv(f"ACCOUNT_{i}_KEY", "").strip()
         sender = os.getenv(f"ACCOUNT_{i}_SENDER", "").strip()
         label = os.getenv(f"ACCOUNT_{i}_LABEL", f"Compte {i}").strip()
