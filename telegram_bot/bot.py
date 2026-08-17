@@ -357,9 +357,6 @@ async def ask_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ASK_BODY
 
 
-MAX_HTML_SIZE = 2 * 1024 * 1024  # 2 Mo
-
-
 async def _finish_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Affiche l'aperçu une fois le corps du message renseigné."""
     d = context.user_data
@@ -408,10 +405,6 @@ async def ask_body_document(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "(ou tapez/collez votre message).",
             parse_mode=ParseMode.MARKDOWN,
         )
-        return ASK_BODY
-
-    if doc.file_size and doc.file_size > MAX_HTML_SIZE:
-        await update.message.reply_text("❌ Fichier trop volumineux (max 2 Mo).")
         return ASK_BODY
 
     try:
