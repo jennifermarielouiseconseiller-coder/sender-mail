@@ -152,7 +152,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await deny(update)
         return
     await update.message.reply_text(
-        "👋 *Bot d'envoi d'emails (Resend)*\n\n"
+        "👋 *L3 SENDER*\n\n"
         "✉️ /email — envoyer un email (assistant guidé)\n"
         "🏷️ /nom — définir votre nom d'expéditeur par défaut\n"
         "📇 /comptes — voir les comptes d'envoi disponibles\n"
