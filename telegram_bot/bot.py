@@ -116,15 +116,28 @@ def build_from(name: str, sender_email: str) -> str:
     return f"{name} <{sender_email}>" if name else sender_email
 
 
-def send_email(account: dict, from_name: str, to: str, subject: str, body: str) -> tuple[bool, str]:
+HTML_TAG_REGEX = re.compile(r"<(html|body|div|p|br|table|h[1-6]|a|img|span|ul|ol|li|strong|em|b|i)\b", re.IGNORECASE)
+
+
+def looks_like_html(text: str) -> bool:
+    """Détecte si un contenu ressemble à du HTML (balises courantes présentes)."""
+    return bool(text) and bool(HTML_TAG_REGEX.search(text))
+
+
+def send_email(account: dict, from_name: str, to: str, subject: str, body: str,
+               is_html: bool = False) -> tuple[bool, str]:
     resend.api_key = account["key"]
+    payload = {
+        "from": build_from(from_name, account["sender"]),
+        "to": [to],
+        "subject": subject,
+    }
+    if is_html:
+        payload["html"] = body
+    else:
+        payload["text"] = body
     try:
-        result = resend.Emails.send({
-            "from": build_from(from_name, account["sender"]),
-            "to": [to],
-            "subject": subject,
-            "text": body,
-        })
+        result = resend.Emails.send(payload)
         email_id = result.get("id") if isinstance(result, dict) else None
         return True, f"ID Resend : {email_id}"
     except Exception as e:  # noqa: BLE001
@@ -271,7 +284,8 @@ async def _quick_send(update: Update, context: ContextTypes.DEFAULT_TYPE, payloa
         return ConversationHandler.END
     account = ACCOUNTS[0]
     await update.message.reply_text("📤 Envoi en cours...")
-    ok, detail = send_email(account, get_default_name(), to, subject, body)
+    ok, detail = send_email(account, get_default_name(), to, subject, body,
+                            is_html=looks_like_html(body))
     await update.message.reply_text(
         f"✅ Email envoyé à {to}" if ok else f"❌ Échec.\nDétail : {detail}"
     )
@@ -332,25 +346,93 @@ async def ask_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def ask_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["subject"] = update.message.text.strip()
-    await update.message.reply_text("💬 Écrivez le *message* :", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "💬 Envoyez le *message* :\n\n"
+        "• Tapez votre texte, *ou*\n"
+        "• Collez directement du *code HTML*, *ou*\n"
+        "• Envoyez un *fichier* `.html` en pièce jointe.\n\n"
+        "Le HTML est détecté automatiquement et l'email sera envoyé au bon format.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
     return ASK_BODY
 
 
-async def ask_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["body"] = update.message.text
+MAX_HTML_SIZE = 2 * 1024 * 1024  # 2 Mo
+
+
+async def _finish_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Affiche l'aperçu une fois le corps du message renseigné."""
     d = context.user_data
     account = d["account"]
     name = d.get("from_name", "")
+    is_html = d.get("is_html", False)
+
+    body = d["body"]
+    if is_html:
+        extrait = body if len(body) <= 500 else body[:500] + "\n… (tronqué)"
+        corps_apercu = f"🧩 *Contenu HTML* ({len(body)} caractères) :\n```\n{extrait}\n```"
+    else:
+        corps_apercu = f"*Message :*\n{body}"
+
     apercu = (
         "👀 *Aperçu de l'email*\n\n"
         f"*De :* {build_from(name, account['sender'])}\n"
         f"*À :* {d['to']}\n"
         f"*Sujet :* {d['subject']}\n"
-        f"*Message :*\n{d['body']}\n\n"
+        f"*Format :* {'HTML' if is_html else 'Texte'}\n"
+        f"{corps_apercu}\n\n"
         "Confirmez l'envoi ?"
     )
-    await update.message.reply_text(apercu, parse_mode=ParseMode.MARKDOWN, reply_markup=confirm_keyboard())
+    await update.effective_message.reply_text(
+        apercu, parse_mode=ParseMode.MARKDOWN, reply_markup=confirm_keyboard()
+    )
     return CONFIRM
+
+
+async def ask_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text or ""
+    context.user_data["body"] = text
+    context.user_data["is_html"] = looks_like_html(text)
+    return await _finish_body(update, context)
+
+
+async def ask_body_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Traite un fichier HTML envoyé en pièce jointe comme corps de l'email."""
+    doc = update.message.document
+    filename = (doc.file_name or "").lower()
+    is_html_file = filename.endswith((".html", ".htm")) or (doc.mime_type or "") == "text/html"
+
+    if not is_html_file:
+        await update.message.reply_text(
+            "❌ Fichier non pris en charge. Envoyez un fichier `.html` "
+            "(ou tapez/collez votre message).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ASK_BODY
+
+    if doc.file_size and doc.file_size > MAX_HTML_SIZE:
+        await update.message.reply_text("❌ Fichier trop volumineux (max 2 Mo).")
+        return ASK_BODY
+
+    try:
+        tg_file = await doc.get_file()
+        content_bytes = await tg_file.download_as_bytearray()
+        content = bytes(content_bytes).decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(f"❌ Impossible de lire le fichier : {e}")
+        return ASK_BODY
+
+    if not content.strip():
+        await update.message.reply_text("❌ Le fichier est vide. Réessayez :")
+        return ASK_BODY
+
+    context.user_data["body"] = content
+    context.user_data["is_html"] = True
+    await update.message.reply_text(
+        f"📎 Fichier HTML reçu : `{doc.file_name}` ({len(content)} caractères).",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return await _finish_body(update, context)
 
 
 async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -358,7 +440,10 @@ async def confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     d = context.user_data
     await query.edit_message_text("📤 Envoi en cours...")
-    ok, detail = send_email(d["account"], d.get("from_name", ""), d["to"], d["subject"], d["body"])
+    ok, detail = send_email(
+        d["account"], d.get("from_name", ""), d["to"], d["subject"], d["body"],
+        is_html=d.get("is_html", False),
+    )
     if ok:
         await query.message.reply_text(f"✅ Email envoyé à {d['to']} !")
         logger.info("Email envoyé à %s par %s", d["to"], update.effective_user.id)
@@ -400,7 +485,10 @@ def main() -> None:
             ],
             ASK_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_to)],
             ASK_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_subject)],
-            ASK_BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_body)],
+            ASK_BODY: [
+                MessageHandler(filters.Document.ALL, ask_body_document),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_body),
+            ],
             CONFIRM: [
                 CallbackQueryHandler(confirm_send, pattern=r"^send$"),
                 CallbackQueryHandler(cancel, pattern=r"^cancel$"),
