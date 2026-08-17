@@ -27,4 +27,11 @@
 
 ## Backlog / Next
 - P1 : Historique des envois, templates d'email, pièces jointes, support HTML
-- P2 : Mode guidé étape par étape, tableau de bord web
+- P2 : Tableau de bord web
+
+## Itération 2 (2026-08-17)
+- Assistant guidé pas à pas avec boutons (Compte → Nom → Destinataire → Sujet → Message → Aperçu → Envoyer) ✅
+- Nom d'expéditeur personnalisable : défaut via `/nom` + modifiable à chaque envoi ✅
+- Sélecteur multi-comptes/clés : Compte 1 (topwork.se) / Compte 2 (forssdigital.com), extensible jusqu'à 5 via `ACCOUNT_n_*` ✅ TESTÉ (envoi compte 2 + nom perso OK)
+- Note : pas de « clé Resend Emergent » (n'existe pas) → Compte 2 utilise un 2e domaine vérifié de la même clé, remplaçable par une autre clé plus tard.
+- Raccourci `/email dest | sujet | msg` conservé.
