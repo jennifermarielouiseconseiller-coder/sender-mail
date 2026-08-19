@@ -7,7 +7,10 @@ Bot Telegram d'envoi d'emails via Resend.
 """
 import os
 import re
+import io
 import json
+import time
+import asyncio
 import logging
 from pathlib import Path
 
@@ -15,6 +18,7 @@ import resend
 from dotenv import load_dotenv
 from telegram import (
     Update,
+    InputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -49,8 +53,14 @@ AUTHORIZED_USER_IDS = {
 
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Délai entre deux envois en masse (secondes) — régule le débit (anti-spam / rate-limit)
+MASS_SEND_DELAY = float(os.getenv("MASS_SEND_DELAY", "0.6"))
+
 # --- Conversation states ---
 CHOOSE_ACCOUNT, ASK_NAME, ASK_TO, ASK_SUBJECT, ASK_BODY, CONFIRM = range(6)
+
+# --- Conversation states (envoi en masse) ---
+(M_ACCOUNT, M_NAME, M_RECIPIENTS, M_SUBJECT, M_BODY, M_CONFIRM) = range(100, 106)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +164,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *L3 SENDER*\n\n"
         "✉️ /email — envoyer un email (assistant guidé)\n"
+        "📣 /masse — envoi en masse (liste + suivi + échecs)\n"
         "🏷️ /nom — définir votre nom d'expéditeur par défaut\n"
         "📇 /comptes — voir les comptes d'envoi disponibles\n"
         "❓ /help — aide\n\n"
@@ -171,6 +182,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "ℹ️ *Aide*\n\n"
         "*Envoyer :* /email (assistant pas à pas avec boutons).\n"
+        "*Envoi en masse :* /masse (liste `.txt` ou collée → même email pour tous, "
+        "suivi en direct + rapport des échecs).\n"
         "*Nom par défaut :* /nom VotreNom (ex: `/nom Faracosta`).\n"
         "Vous pouvez aussi changer le nom à chaque envoi.\n\n"
         f"*Nom d'expéditeur par défaut :* `{default_name}`\n"
@@ -479,6 +492,308 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Envoi en masse (/masse)
+# ---------------------------------------------------------------------------
+def parse_emails(text: str) -> tuple[list[str], list[str]]:
+    """Extrait les emails d'un texte. Retourne (valides_dédupliqués, invalides)."""
+    tokens = re.split(r"[\s,;]+", text or "")
+    valid, invalid, seen = [], [], set()
+    for tok in tokens:
+        t = tok.strip().strip("<>").lower()
+        if not t:
+            continue
+        if EMAIL_REGEX.match(t):
+            if t not in seen:
+                seen.add(t)
+                valid.append(t)
+        else:
+            invalid.append(tok.strip())
+    return valid, invalid
+
+
+def mass_account_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(a["label"], callback_data=f"macct:{a['index']}")] for a in ACCOUNTS]
+    rows.append([InlineKeyboardButton("❌ Annuler", callback_data="mcancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def mass_name_keyboard() -> InlineKeyboardMarkup:
+    default_name = get_default_name()
+    rows = []
+    if default_name:
+        rows.append([InlineKeyboardButton(f"👤 {default_name} (par défaut)", callback_data="mname:default")])
+    rows.append([InlineKeyboardButton("🚫 Sans nom", callback_data="mname:none")])
+    rows.append([InlineKeyboardButton("❌ Annuler", callback_data="mcancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def mass_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Lancer l'envoi en masse", callback_data="msend")],
+        [InlineKeyboardButton("❌ Annuler", callback_data="mcancel")],
+    ])
+
+
+async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_authorized(update):
+        await deny(update)
+        return ConversationHandler.END
+    if not ACCOUNTS:
+        await update.message.reply_text("⚠️ Aucun compte d'envoi configuré.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    if len(ACCOUNTS) == 1:
+        context.user_data["account"] = ACCOUNTS[0]
+        return await _mass_ask_name(update, context)
+
+    await update.message.reply_text(
+        "📣 *Envoi en masse*\n\nDepuis quel compte voulez-vous envoyer ?",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=mass_account_keyboard(),
+    )
+    return M_ACCOUNT
+
+
+async def mass_choose_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    account = next((a for a in ACCOUNTS if a["index"] == idx), None)
+    if not account:
+        await query.edit_message_text("Compte introuvable. /masse pour recommencer.")
+        return ConversationHandler.END
+    context.user_data["account"] = account
+    await query.edit_message_text(f"✅ Compte : *{account['label']}* (`{account['sender']}`)",
+                                  parse_mode=ParseMode.MARKDOWN)
+    return await _mass_ask_name(update, context)
+
+
+async def _mass_ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.effective_message.reply_text(
+        "🏷️ *Nom d'expéditeur ?*\n\nTapez le nom à afficher, ou utilisez un bouton.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=mass_name_keyboard(),
+    )
+    return M_NAME
+
+
+async def _mass_ask_recipients_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.effective_message.reply_text(
+        "👥 *Destinataires ?*\n\n"
+        "• Envoyez un *fichier* `.txt` (une adresse par ligne), *ou*\n"
+        "• Collez la *liste* d'adresses (séparées par virgule, espace ou retour à la ligne).",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return M_RECIPIENTS
+
+
+async def mass_name_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data.split(":")[1]
+    name = get_default_name() if choice == "default" else ""
+    context.user_data["from_name"] = name
+    await query.edit_message_text(f"🏷️ Nom d'expéditeur : {name if name else '(sans nom)'}")
+    return await _mass_ask_recipients_prompt(update, context)
+
+
+async def mass_name_typed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["from_name"] = update.message.text.strip()
+    return await _mass_ask_recipients_prompt(update, context)
+
+
+async def _mass_store_recipients(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> int:
+    valid, invalid = parse_emails(text)
+    if not valid:
+        await update.effective_message.reply_text(
+            "❌ Aucune adresse valide trouvée. Renvoyez un fichier `.txt` ou collez la liste :",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return M_RECIPIENTS
+    context.user_data["recipients"] = valid
+    msg = f"✅ *{len(valid)}* destinataire(s) valides détecté(s)."
+    if invalid:
+        apercu = ", ".join(invalid[:5]) + ("…" if len(invalid) > 5 else "")
+        msg += f"\n⚠️ {len(invalid)} entrée(s) ignorée(s) (invalides) : {apercu}"
+    await update.effective_message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("📝 Quel est le *sujet* ?", parse_mode=ParseMode.MARKDOWN)
+    return M_SUBJECT
+
+
+async def mass_recipients_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _mass_store_recipients(update, context, update.message.text or "")
+
+
+async def mass_recipients_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    doc = update.message.document
+    try:
+        tg_file = await doc.get_file()
+        raw = await tg_file.download_as_bytearray()
+        content = _decode_bytes(bytes(raw))
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(f"❌ Impossible de lire le fichier : {e}")
+        return M_RECIPIENTS
+    return await _mass_store_recipients(update, context, content)
+
+
+async def mass_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["subject"] = update.message.text.strip()
+    await update.message.reply_text(
+        "💬 Envoyez le *message* (identique pour tous) :\n\n"
+        "• Tapez du texte, *ou* collez du *code HTML*, *ou* envoyez un *fichier* `.html`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return M_BODY
+
+
+async def _mass_finish_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    d = context.user_data
+    account = d["account"]
+    name = d.get("from_name", "")
+    is_html = d.get("is_html", False)
+    n = len(d.get("recipients", []))
+    body = d["body"]
+    extrait = body if len(body) <= 400 else body[:400] + "…"
+    corps = f"```\n{extrait}\n```" if is_html else extrait
+    apercu = (
+        "👀 *Aperçu de l'envoi en masse*\n\n"
+        f"*De :* {build_from(name, account['sender'])}\n"
+        f"*Destinataires :* {n}\n"
+        f"*Sujet :* {d['subject']}\n"
+        f"*Format :* {'HTML' if is_html else 'Texte'}\n"
+        f"*Débit :* ~1 email / {MASS_SEND_DELAY:g}s\n"
+        f"{corps}\n\n"
+        f"Lancer l'envoi aux *{n}* destinataires ?"
+    )
+    await update.effective_message.reply_text(
+        apercu, parse_mode=ParseMode.MARKDOWN, reply_markup=mass_confirm_keyboard()
+    )
+    return M_CONFIRM
+
+
+async def mass_body_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text or ""
+    context.user_data["body"] = text
+    context.user_data["is_html"] = looks_like_html(text)
+    return await _mass_finish_body(update, context)
+
+
+async def mass_body_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    doc = update.message.document
+    filename = doc.file_name or "fichier"
+    try:
+        tg_file = await doc.get_file()
+        raw = await tg_file.download_as_bytearray()
+        content = _decode_bytes(bytes(raw))
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(f"❌ Impossible de lire le fichier : {e}")
+        return M_BODY
+    if not content.strip():
+        await update.message.reply_text("❌ Le fichier semble vide. Réessayez :")
+        return M_BODY
+    is_html = filename.lower().endswith((".html", ".htm")) or looks_like_html(content)
+    context.user_data["body"] = content
+    context.user_data["is_html"] = is_html
+    await update.message.reply_text(
+        f"📎 Fichier reçu : `{filename}` — format : *{'HTML' if is_html else 'Texte'}*.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return await _mass_finish_body(update, context)
+
+
+async def _run_mass_send(bot, chat_id: int, account: dict, name: str,
+                         recipients: list[str], subject: str, body: str,
+                         is_html: bool, status_msg_id: int, user_id: int) -> None:
+    total = len(recipients)
+    sent_ok = 0
+    failed: list[tuple[str, str]] = []
+    last_edit = 0.0
+
+    async def refresh(final: bool = False) -> None:
+        done = sent_ok + len(failed)
+        txt = (f"📤 *Envoi en masse en cours…*\n\n"
+               f"Traités : *{done}/{total}*\n✅ Réussis : *{sent_ok}*\n❌ Échecs : *{len(failed)}*")
+        if final:
+            txt = (f"🏁 *Envoi en masse terminé*\n\n"
+                   f"Total : *{total}*\n✅ Réussis : *{sent_ok}*\n❌ Échecs : *{len(failed)}*")
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id,
+                                        text=txt, parse_mode=ParseMode.MARKDOWN)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for i, to in enumerate(recipients, 1):
+        try:
+            ok, detail = await asyncio.to_thread(
+                send_email, account, name, to, subject, body, is_html
+            )
+        except Exception as e:  # noqa: BLE001
+            ok, detail = False, str(e)
+        if ok:
+            sent_ok += 1
+        else:
+            failed.append((to, detail))
+            logger.error("Masse: échec %s : %s", to, detail)
+
+        now = time.monotonic()
+        if i == total or now - last_edit >= 3:
+            last_edit = now
+            await refresh()
+        if i < total:
+            await asyncio.sleep(MASS_SEND_DELAY)
+
+    await refresh(final=True)
+    logger.info("Masse terminée par %s : %s/%s OK, %s échecs",
+                user_id, sent_ok, total, len(failed))
+
+    if failed:
+        report = "Adresse;Raison\n" + "\n".join(f"{addr};{reason}" for addr, reason in failed)
+        if len(failed) <= 20 and len(report) < 3500:
+            lignes = "\n".join(f"• {addr} — {reason}" for addr, reason in failed)
+            await bot.send_message(chat_id=chat_id,
+                                   text=f"❌ *Détail des {len(failed)} échec(s) :*\n{lignes}",
+                                   parse_mode=ParseMode.MARKDOWN)
+        else:
+            buf = io.BytesIO(report.encode("utf-8"))
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(buf, filename="echecs.csv"),
+                caption=f"❌ {len(failed)} échec(s) — détail en pièce jointe.",
+            )
+
+
+async def mass_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    d = context.user_data
+    recipients = d.get("recipients", [])
+    total = len(recipients)
+    account = d["account"]
+    name = d.get("from_name", "")
+    subject = d["subject"]
+    body = d["body"]
+    is_html = d.get("is_html", False)
+
+    await query.edit_message_text(
+        f"🚀 Lancement de l'envoi à *{total}* destinataire(s)…",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    status = await query.message.reply_text(
+        f"📤 *Envoi en masse en cours…*\n\nTraités : *0/{total}*\n✅ Réussis : *0*\n❌ Échecs : *0*",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    # Envoi en tâche de fond pour garder le bot réactif
+    asyncio.create_task(_run_mass_send(
+        context.bot, query.message.chat_id, account, name, recipients,
+        subject, body, is_html, status.message_id, update.effective_user.id,
+    ))
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN manquant dans .env")
@@ -511,12 +826,42 @@ def main() -> None:
         fallbacks=[CommandHandler("annuler", cancel)],
     )
 
+    conv_mass = ConversationHandler(
+        entry_points=[CommandHandler("masse", mass_start)],
+        states={
+            M_ACCOUNT: [
+                CallbackQueryHandler(mass_choose_account, pattern=r"^macct:"),
+                CallbackQueryHandler(cancel, pattern=r"^mcancel$"),
+            ],
+            M_NAME: [
+                CallbackQueryHandler(mass_name_button, pattern=r"^mname:"),
+                CallbackQueryHandler(cancel, pattern=r"^mcancel$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mass_name_typed),
+            ],
+            M_RECIPIENTS: [
+                MessageHandler(filters.Document.ALL, mass_recipients_document),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mass_recipients_text),
+            ],
+            M_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, mass_subject)],
+            M_BODY: [
+                MessageHandler(filters.Document.ALL, mass_body_document),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mass_body_text),
+            ],
+            M_CONFIRM: [
+                CallbackQueryHandler(mass_confirm, pattern=r"^msend$"),
+                CallbackQueryHandler(cancel, pattern=r"^mcancel$"),
+            ],
+        },
+        fallbacks=[CommandHandler("annuler", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("comptes", comptes))
     app.add_handler(CommandHandler("nom", set_name))
     app.add_handler(conv)
+    app.add_handler(conv_mass)
 
     logger.info("Bot démarré. Comptes: %s | Utilisateurs autorisés: %s",
                  [a["label"] for a in ACCOUNTS], AUTHORIZED_USER_IDS)
